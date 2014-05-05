@@ -16,6 +16,7 @@ import logging
 
 import docopt
 
+
 class ParseTime(object):
     """
     Each definition can consist of combinations of:
@@ -71,8 +72,8 @@ class ParseTime(object):
             'H': 60 * 60,
             'd': 60 * 60 * 24,
             'W': 60 * 60 * 24 * 7,
-            'm': 60 * 60 * 24 * (365 / 12.0),
-            'y': 60 * 60 * 24 * 365
+            'm': 60 * 60 * 24 * 30,
+            'y': 60 * 60 * 24 * 360
         }
 
         def enumerate(self):
@@ -187,8 +188,8 @@ class ParseTime(object):
             60 * 60,
             60 * 60 * 24,
             60 * 60 * 24 * 7,
-            60 * 60 * 24 * (365 / 12.0),
-            60 * 60 * 24 * 365]
+            60 * 60 * 24 * 30,
+            60 * 60 * 24 * 360]
 
         names = [('second', 'seconds'),
                  ('minute', 'minutes'),
@@ -198,20 +199,32 @@ class ParseTime(object):
                  ('month', 'months'),
                  ('year', 'years')]
 
-        result = []
-
+        possible_results = []
         unit = map(lambda element: element[1], names).index(unit)
         amount *= intervals[unit]
 
-        for name_index in range(len(names) - 1, -1, -1):
-            interval_amount = int(amount // intervals[name_index])
-            if interval_amount > 0:
-                result.append((interval_amount, names[name_index][1 % interval_amount]))
-                amount -= interval_amount * intervals[name_index]
+        while len(intervals):
+            this_result = []
+            this_amount = amount
+            this_weight = 0
+            for name_index in range(len(names) - 1, -1, -1):
+                interval_amount = int(this_amount // intervals[name_index])
+                if interval_amount > 0:
+                    this_result.append((interval_amount, names[name_index][1 % interval_amount]))
+                    this_amount -= interval_amount * intervals[name_index]
+                    this_weight += interval_amount
+            this_weight += len(''.join(map(str, itertools.chain(*this_result))))
+            if len(this_result):
+                possible_results.append([this_weight, this_result])
+            intervals = intervals[:-1]
+            names = names[:-1]
+
+        best_result = sorted(possible_results, key=lambda k: k[0])[0][1]
+
         if join is False:
-            return result
+            return best_result
         else:
-            return join.join(map(str, itertools.chain(*result)))
+            return join.join(map(str, itertools.chain(*best_result)))
 
 
 class ParseStart(object):
