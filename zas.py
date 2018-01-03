@@ -4,7 +4,7 @@
 
 """
 Usage:
-  {cmd} --include=<filter>... [--keep=<time>...] [--start=<time>...]
+  {cmd} --include=<filter>... [--keep=<time>...]
     [--exclude=<filter>...] [--prefix=<string>] [--no-prefix-check] [--relative-name]
     [--logfile=<path>] [--lock-file=<path>] [--zfs-binary=<path>] [--symlinks]
     [--verbose] [--run]
@@ -14,17 +14,10 @@ Options:
   --keep=<time>         Definition how old a snapshot is required to be maximal..
                         {time_help}
 
-  --start=<time>        Restrict which at which a new snapshots may be created..
-                        {start_help}
-
-                        For sure, the start time should be lower then the lowest keep time.
-
   --exclude=<filter>    Regular expression to exclude filesystems by name.
   --logfile=<path>      Write output to logfile (default is STDOUT).
   --prefix=<string>     Snapshot name prefix. [default: snapshot-from-].
   --no-prefix-check     Don't ignore snapshots without matching prefix.
-  --relative-name       Name the by the keep-definition that it requires it existence.
-                        Default is creation time.
   --lock-file=<path>    Alternative location of lock file (default is the script file).
   --zfs-binary=<path>   Alternative location of zfs binary [default: /sbin/zfs].
   --symlinks            Create symlink required by samba vfs objects shadow_copy.
@@ -37,7 +30,7 @@ Example:
       1 to 6 hours, 1 to 7 days and each quarter of a year, take new snapshots
       only when the hour begins:
 
-        $ {cmd} --include=tank/backup --keep=1H*6,1d*7,1y/4 --start=0M -r
+        $ {cmd} --include=tank/backup --keep=1H*6,1d*7,1y/4 -r
  """
 
 __author__ = "Frank Epperlein"
@@ -266,144 +259,8 @@ class ParseTime(object):
             return join.join(map(str, itertools.chain(*best_result)))
 
 
-class ParseStart(object):
-    """
-    Each definition can consist of combinations of:
-        a number (1,2,3,...)
-        a letter (D,W,H or M)
-            d = Day of actual Month
-            w = Day of actual Week
-            H = Hour of actual Day
-            M = Minute of actual Hour
-        an optional "*", that means any multiples of the
-            defined times
-        an + combined with a number to set an offset
-            of the defined time to the start of the
-            estimated month, week, day or hour
-        an .. combined with a number to set a max
-            possible value
-
-    Weekdays are defined as:
-        1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat, 7=Sun
-
-    Examples:
-        5w: the 5th day of the week
-        2d*: the 2nd, 4th, 6th, ... day of the month
-        2H*+10..14: every second hour in range of 10 to 14
-        5M*, every fifth minute
-        5w,2d,2H*+10..14,5M*: every fifth minute on every
-            second hour in range of 10 to 14 on a day which
-            is the second day of the month and the fifth
-            day of the week
-        5w,14H: 14th hour on each friday
-        8H: 8th hour on every day
-    """
-
-    def __init__(self, definition, start_time=False):
-        """
-        Initialize parser.
-
-        :param definition: definition string
-
-        :param start_time: alternative start time
-        :type start_time: datetime.datetime or False
-        """
-        if isinstance(start_time, datetime.datetime):
-            self.start_time = start_time
-        else:
-            self.start_time = datetime.datetime.now()
-        self.definition = definition
-
-    @property
-    def allowed(self):
-        """
-        Parse start-time-definition and check if we can
-            create new snapshots now.
-        """
-
-        def affects(now, reference, multiplier, offset, until):
-            offset = offset and int(offset) or 0
-            until = until and int(until) or 0
-
-            # not if offset is undershot
-            if (now - offset) < 0:
-                return False
-
-            # not if until exceeded
-            if until and now > until:
-                return False
-
-            if multiplier:
-                if (now - offset) % reference == 0:
-                    return True
-            else:
-                if (now - offset) == reference:
-                    return True
-
-            return False
-
-        defined_criteria = 0
-
-        # day of month
-        for match in re.finditer(r"(?P<day>\d+)d(?P<multiplier>\*)?(?:\+(?P<offset>\d+))?(?:\.\.(?P<until>\d+))?",
-                                 self.definition):
-            defined_criteria += 1
-            if not affects(
-                    self.start_time.day,
-                    int(match.group('day')),
-                    match.group('multiplier'),
-                    match.group('offset'),
-                    match.group('until')):
-                return False
-            break
-
-        # day of week
-        for match in re.finditer(
-                r"(?P<weekday>\d+)w(?P<multiplier>\*)?(?:\+(?P<offset>\d+))?(?:\.\.(?P<until>\d+))?",
-                self.definition):
-            defined_criteria += 1
-            if not affects(
-                    self.start_time.weekday() + 1,
-                    int(match.group('weekday')),
-                    match.group('multiplier'),
-                    match.group('offset'),
-                    match.group('until')):
-                return False
-
-            break
-
-        # hour of day
-        for match in re.finditer(r"(?P<hour>\d+)H(?P<multiplier>\*)?(?:\+(?P<offset>\d+))?(?:\.\.(?P<until>\d+))?",
-                                 self.definition):
-            defined_criteria += 1
-            if not affects(
-                    self.start_time.hour,
-                    int(match.group('hour')),
-                    match.group('multiplier'),
-                    match.group('offset'),
-                    match.group('until')):
-                return False
-            break
-
-        # minute of hour
-        for match in re.finditer(r'(?P<hour>\d+)M(?P<multiplier>\*)?(?:\+(?P<offset>\d+))?(?:\.\.(?P<until>\d+))?',
-                                 self.definition):
-            defined_criteria += 1
-            if not affects(
-                    self.start_time.minute,
-                    int(match.group('hour')),
-                    match.group('multiplier'),
-                    match.group('offset'),
-                    match.group('until')):
-                return False
-            break
-
-        return bool(defined_criteria)
-
-
 class SnapshotManager(object):
-    def __init__(self, binary=False, prefix="yt", prefix_check=True, relative_name=False):
-        self.relative_name = relative_name
+    def __init__(self, binary=False, prefix="yt", prefix_check=True):
         self.zfs_binary = binary or "/sbin/zfs"
         self.snapshot_prefix = prefix
         self.prefix_check = prefix_check
@@ -634,11 +491,8 @@ class SnapshotManager(object):
                 else:
                     logging.error("%s: %s" % (self, ps.stderr.read().strip()))
 
-    def _snapshot_name(self, job_time: int, snapshot_creation: datetime.datetime):
-        if self.relative_name:
-            return "%s%s" % (self.snapshot_prefix, ParseTime.humanize_time(job_time, join=""))
-        else:
-            return "%s%s" % (self.snapshot_prefix, snapshot_creation.replace(second=0, microsecond=0).isoformat())
+    def _snapshot_name(self, snapshot_creation: datetime.datetime):
+        return "%s%s" % (self.snapshot_prefix, snapshot_creation.replace(second=0, microsecond=0).isoformat())
 
     def plan(self,
              planed_jobs,
@@ -702,9 +556,7 @@ class SnapshotManager(object):
             sorted_snapshots.reverse()
             for snapshot in map(lambda k: k[0], sorted_snapshots):
                 if planed_filesystems[filesystem]['snapshots'][snapshot]['required_by']:
-                    target_name = self._snapshot_name(
-                        job_time=planed_filesystems[filesystem]['snapshots'][snapshot]['required_by'],
-                        snapshot_creation=planed_filesystems[filesystem]['snapshots'][snapshot]['creation'])
+                    target_name = self._snapshot_name(planed_filesystems[filesystem]['snapshots'][snapshot]['creation'])
                     if allow_rename and snapshot != target_name:
                         yield self.RenameSnapshot(self, filesystem, snapshot, target_name)
                         if maintain_symlinks:
@@ -716,7 +568,7 @@ class SnapshotManager(object):
 
             # see if we need to add a new snapshot
             if allow_create and len(planed_jobs) and planed_jobs[0] not in satisfied_jobs:
-                target_name = self._snapshot_name(job_time=planed_jobs[0], snapshot_creation=datetime.datetime.now())
+                target_name = self._snapshot_name(datetime.datetime.now())
                 yield self.CreateSnapshot(self, filesystem, target_name)
                 if maintain_symlinks:
                     yield self.CreateSymlink(
@@ -742,8 +594,7 @@ def lock(path=__file__):
 
 if __name__ == "__main__":
     arguments = docopt.docopt(__doc__.format(cmd=os.path.basename(__file__),
-                                             time_help=indent(ParseTime.__doc__, ' ' * 20),
-                                             start_help=indent(ParseStart.__doc__, ' ' * 20)))
+                                             time_help=indent(ParseTime.__doc__, ' ' * 20)))
 
     logging.basicConfig(
         filename=arguments['--logfile'],
@@ -763,7 +614,6 @@ if __name__ == "__main__":
 
     zsm = SnapshotManager(
         binary=arguments['--zfs-binary'],
-        relative_name=arguments['--relative-name'],
         prefix=arguments['--prefix'],
         prefix_check=not arguments['--no-prefix-check']
     )
@@ -771,20 +621,11 @@ if __name__ == "__main__":
     jobs = ParseTime(';'.join(arguments['--keep']))
     filesystems = zsm.filesystems(includes=arguments['--include'], excludes=arguments['--exclude'])
 
-    creation_restricted = False
-    if len(arguments['--start']):
-        creation_restricted = True
-        for allowed_start_time in arguments['--start']:
-            if ParseStart(allowed_start_time).allowed:
-                logging.debug('creation allowed by start definition "%s"', allowed_start_time)
-                creation_restricted = False
-
     logging.debug("planing jobs for following times: %s", ", ".join(jobs.human))
     plan = zsm.plan(
         jobs.times,
         filesystems,
-        maintain_symlinks=arguments['--symlinks'],
-        allow_create=not creation_restricted)
+        maintain_symlinks=arguments['--symlinks'])
 
     for index, action in enumerate(plan):
         if arguments['--run']:
