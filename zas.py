@@ -49,7 +49,7 @@ from textwrap import indent
 import docopt
 
 
-class ParseTime(object):
+class TimeParser(object):
     """
     Each definition can consist of combinations of:
         a number (1,2,3,...)
@@ -116,7 +116,7 @@ class ParseTime(object):
 
         def enumerate(self, times):
             for this_time in times:
-                split = this_time / int(self.groups[1])
+                split = this_time // int(self.groups[1])
                 while this_time > 0:
                     yield this_time
                     this_time -= split
@@ -137,11 +137,11 @@ class ParseTime(object):
         def enumerate(self):
             result = []
             for part in self:
-                if isinstance(part, ParseTime.Time):
+                if isinstance(part, TimeParser.Time):
                     result = [sum(result + [part.enumerate()])]
-                elif isinstance(part, ParseTime.Divider):
+                elif isinstance(part, TimeParser.Divider):
                     result = list(part.enumerate(result))
-                elif isinstance(part, ParseTime.Multiplier):
+                elif isinstance(part, TimeParser.Multiplier):
                     result = list(part.enumerate(result))
             return result
 
@@ -162,7 +162,7 @@ class ParseTime(object):
         tokens = self.lex(text)
         combinations = self.combine(tokens)
         self.times = self.enumerate(combinations)
-        self.human = self.humanize(self.times)
+        self.human_times = self.humanize(self.times)
 
     def lex(self, text):
         while len(text):
@@ -260,7 +260,8 @@ class ParseTime(object):
 
 
 class SnapshotManager(object):
-    def __init__(self, binary=False, prefix="yt", prefix_check=True):
+
+    def __init__(self, binary=False, prefix="snapshot-from-", prefix_check=True):
         self.zfs_binary = binary or "/sbin/zfs"
         self.snapshot_prefix = prefix
         self.prefix_check = prefix_check
@@ -270,9 +271,9 @@ class SnapshotManager(object):
 
     def filesystems(self, includes=None, excludes=None):
 
-        def parse_time(timestr):
+        def parse_time(time_str):
             fmt = "%a %b %d %H:%M %Y"
-            return datetime.datetime.strptime(timestr, fmt)
+            return datetime.datetime.strptime(time_str, fmt)
 
         if not excludes:
             excludes = []
@@ -325,23 +326,13 @@ class SnapshotManager(object):
 
         return result_index
 
-    class CreateSnapshot(object):
-
-        def __init__(self, manager, filesystem, name):
-            self.manager = manager
-            self.filesystem = filesystem
-            self.name = name
-            logging.debug("planed to %s" % self)
+    class Action(object):
 
         def __repr__(self):
-            return "create snapshot (%s@%s)" % (self.filesystem, self.name)
+            raise NotImplementedError()
 
-        def do(self):
-            cmd = [
-                self.manager.zfs_binary,
-                "snapshot", "%s@%s" % (self.filesystem, self.name)
-            ]
-            logging.debug("calling \"%s\"", ' '.join(cmd))
+        def call(self, *cmd):
+            logging.debug("calling %r", ' '.join(cmd))
             ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             ps.wait()
             if not ps.returncode:
@@ -349,7 +340,22 @@ class SnapshotManager(object):
             else:
                 logging.error("%s: %s" % (self, ps.stderr.read().strip()))
 
-    class DeleteSnapshot(object):
+        def do(self):
+            raise NotImplementedError()
+
+    class CreateSnapshot(Action):
+
+        def __init__(self, manager, filesystem, name):
+            self.manager, self.filesystem, self.name = manager, filesystem, name
+            logging.debug("planed to %s" % self)
+
+        def __repr__(self):
+            return "create snapshot (%s@%s)" % (self.filesystem, self.name)
+
+        def do(self):
+            self.call(self.manager.zfs_binary, "snapshot", "%s@%s" % (self.filesystem, self.name))
+
+    class DeleteSnapshot(Action):
 
         def __init__(self, manager, filesystem, name):
             self.manager = manager
@@ -361,19 +367,9 @@ class SnapshotManager(object):
             return "delete snapshot (%s@%s)" % (self.filesystem, self.name)
 
         def do(self):
-            cmd = [
-                self.manager.zfs_binary,
-                "destroy", "%s@%s" % (self.filesystem, self.name)
-            ]
-            logging.debug("calling \"%s\"", ' '.join(cmd))
-            ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            ps.wait()
-            if not ps.returncode:
-                logging.info(self)
-            else:
-                logging.error("%s: %s" % (self, ps.stderr.read().strip()))
+            self.call(self.manager.zfs_binary, "destroy", "%s@%s" % (self.filesystem, self.name))
 
-    class RenameSnapshot(object):
+    class RenameSnapshot(Action):
 
         def __init__(self, manager, filesystem, old_name, new_name):
             self.manager = manager
@@ -386,21 +382,12 @@ class SnapshotManager(object):
             return "rename snapshot (%s@%s > %s)" % (self.filesystem, self.old_name, self.new_name)
 
         def do(self):
-            cmd = [
-                self.manager.zfs_binary,
-                "rename",
-                "%s@%s" % (self.filesystem, self.old_name),
-                "%s@%s" % (self.filesystem, self.new_name),
-            ]
-            logging.debug("calling \"%s\"", ' '.join(cmd))
-            ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            ps.wait()
-            if not ps.returncode:
-                logging.info(self)
-            else:
-                logging.error("%s: %s" % (self, ps.stderr.read().strip()))
+            self.call(self.manager.zfs_binary,
+                      "rename",
+                      "%s@%s" % (self.filesystem, self.old_name),
+                      "%s@%s" % (self.filesystem, self.new_name))
 
-    class CreateSymlink(object):
+    class CreateSymlink(Action):
 
         def __init__(self, manager, filesystem, snapshot, mount_point):
             self.manager = manager
@@ -424,21 +411,9 @@ class SnapshotManager(object):
                 return False
 
             if not os.path.islink(self.link_path) and os.path.isdir(self.snapshot_path):
-                cmd = [
-                    "ln",
-                    "--symbolic",
-                    self.snapshot_path,
-                    self.link_path
-                ]
-                logging.debug("calling \"%s\"", ' '.join(cmd))
-                ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                ps.wait()
-                if not ps.returncode:
-                    logging.info(self)
-                else:
-                    logging.error("%s: %s" % (self, ps.stderr.read().strip()))
+                self.call("ln", "--symbolic", self.snapshot_path, self.link_path)
 
-    class DeleteSymlink(object):
+    class DeleteSymlink(Action):
 
         def __init__(self, mount_point, creation):
             self.link_path = "%s/@GMT-%s" % (mount_point, creation.strftime('%Y.%m.%d-%H.%M.%S'))
@@ -449,19 +424,9 @@ class SnapshotManager(object):
 
         def do(self):
             if os.path.islink(self.link_path):
-                cmd = [
-                    "rm",
-                    self.link_path
-                ]
-                logging.debug("calling \"%s\"", ' '.join(cmd))
-                ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                ps.wait()
-                if not ps.returncode:
-                    logging.info(self)
-                else:
-                    logging.error("%s: %s" % (self, ps.stderr.read().strip()))
+                self.call("rm", self.link_path)
 
-    class RenameSymlink(object):
+    class RenameSymlink(Action):
 
         def __init__(self, mount_point, creation, new_name):
             self.link_path = "%s/@GMT-%s" % (mount_point, creation.strftime('%Y.%m.%d-%H.%M.%S'))
@@ -474,33 +439,15 @@ class SnapshotManager(object):
         def do(self):
 
             if os.path.islink(self.link_path):
-                cmd = ["rm", self.link_path]
-                logging.debug("calling \"%s\"", ' '.join(cmd))
-                ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                ps.wait()
-                if ps.returncode:
-                    logging.error("%s: %s" % (self, ps.stderr.read().strip()))
+                self.call("rm", self.link_path)
 
             if os.path.isdir(self.new_snapshot_path):
-                cmd = ["ln", "--symbolic", self.new_snapshot_path, self.link_path]
-                logging.debug("calling \"%s\"", ' '.join(cmd))
-                ps = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                ps.wait()
-                if not ps.returncode:
-                    logging.info(self)
-                else:
-                    logging.error("%s: %s" % (self, ps.stderr.read().strip()))
+                self.call("ln", "--symbolic", self.new_snapshot_path, self.link_path)
 
     def _snapshot_name(self, snapshot_creation: datetime.datetime):
         return "%s%s" % (self.snapshot_prefix, snapshot_creation.replace(second=0, microsecond=0).isoformat())
 
-    def plan(self,
-             planed_jobs,
-             planed_filesystems=None,
-             maintain_symlinks=False,
-             allow_create=True,
-             allow_rename=True,
-             allow_delete=True):
+    def plan(self, planed_jobs, planed_filesystems=None, maintain_symlinks=False):
 
         if planed_filesystems is None:
             planed_filesystems = self.filesystems()
@@ -521,19 +468,12 @@ class SnapshotManager(object):
                 if job_index > 0:
                     last_job = planed_jobs[job_index - 1]
                 else:
-                    last_job = 0
+                    last_job = 0  # 0 = now
 
-                if job in satisfied_jobs:
-                    # continue
-                    pass
+                # check which snapshot satisfies which job (in reverse-age order)
+                for snapshot in map(lambda k: k[0], sorted(planed_filesystems[filesystem]['snapshots'].items(),
+                                                           key=lambda k: k[1]['age'], reverse=True)):
 
-                # use snapshot list, sorted by age
-                sorted_snapshots = sorted(
-                    planed_filesystems[filesystem]['snapshots'].items(),
-                    key=lambda k: k[1]['age'])
-
-                sorted_snapshots.reverse()
-                for snapshot in map(lambda k: k[0], sorted_snapshots):
                     age = planed_filesystems[filesystem]['snapshots'][snapshot]['age']
                     if last_job < age <= job:
                         if planed_filesystems[filesystem]['snapshots'][snapshot]['required_by'] is False:
@@ -543,31 +483,28 @@ class SnapshotManager(object):
 
             # remove snapshots we don't need anymore
             for snapshot in planed_filesystems[filesystem]['snapshots']:
-                if allow_delete and not planed_filesystems[filesystem]['snapshots'][snapshot]['required_by']:
+                if not planed_filesystems[filesystem]['snapshots'][snapshot]['required_by']:
                     yield self.DeleteSnapshot(self, filesystem, snapshot)
                     if maintain_symlinks:
                         yield self.DeleteSymlink(
                             planed_filesystems[filesystem]['mount_point'],
-                            planed_filesystems[filesystem]['snapshots'][snapshot]['creation']
-                        )
+                            planed_filesystems[filesystem]['snapshots'][snapshot]['creation'])
 
-            # rename the others (in reverse-age order)
-            sorted_snapshots = sorted(planed_filesystems[filesystem]['snapshots'].items(), key=lambda k: k[1]['age'])
-            sorted_snapshots.reverse()
-            for snapshot in map(lambda k: k[0], sorted_snapshots):
+            # rename snapshots if required (in reverse-age order)
+            for snapshot in map(lambda k: k[0], sorted(planed_filesystems[filesystem]['snapshots'].items(),
+                                                       key=lambda k: k[1]['age'], reverse=True)):
                 if planed_filesystems[filesystem]['snapshots'][snapshot]['required_by']:
                     target_name = self._snapshot_name(planed_filesystems[filesystem]['snapshots'][snapshot]['creation'])
-                    if allow_rename and snapshot != target_name:
+                    if snapshot != target_name:
                         yield self.RenameSnapshot(self, filesystem, snapshot, target_name)
                         if maintain_symlinks:
                             yield self.RenameSymlink(
                                 planed_filesystems[filesystem]['mount_point'],
                                 planed_filesystems[filesystem]['snapshots'][snapshot]['creation'],
-                                target_name
-                            )
+                                target_name)
 
             # see if we need to add a new snapshot
-            if allow_create and len(planed_jobs) and planed_jobs[0] not in satisfied_jobs:
+            if len(planed_jobs) and planed_jobs[0] not in satisfied_jobs:
                 target_name = self._snapshot_name(datetime.datetime.now())
                 yield self.CreateSnapshot(self, filesystem, target_name)
                 if maintain_symlinks:
@@ -575,8 +512,7 @@ class SnapshotManager(object):
                         self,
                         filesystem,
                         target_name,
-                        planed_filesystems[filesystem]['mount_point']
-                    )
+                        planed_filesystems[filesystem]['mount_point'])
 
 
 def lock(path=__file__):
@@ -594,7 +530,7 @@ def lock(path=__file__):
 
 if __name__ == "__main__":
     arguments = docopt.docopt(__doc__.format(cmd=os.path.basename(__file__),
-                                             time_help=indent(ParseTime.__doc__, ' ' * 20)))
+                                             time_help=indent(TimeParser.__doc__, ' ' * 20)))
 
     logging.basicConfig(
         filename=arguments['--logfile'],
@@ -602,31 +538,28 @@ if __name__ == "__main__":
         datefmt="%Y-%m-%d %H:%M:%S",
         level=arguments['--verbose'] and logging.DEBUG or logging.INFO)
 
-    lock_timer = 30
+    lock_timeout = 60
     while not lock(arguments['--lock-file'] or __file__):
-        if lock_timer:
-            logging.debug('this tool is already locked by another process, waiting 1 sec')
-            lock_timer -= 1
+        if lock_timeout:
+            logging.debug('already locked by another process, retry in 1 sec')
+            lock_timeout -= 1
             time.sleep(1)
         else:
-            logging.critical('this tool is already locked by another process, giving up')
+            logging.critical('already locked by another process, giving up')
             sys.exit(1)
 
     zsm = SnapshotManager(
         binary=arguments['--zfs-binary'],
         prefix=arguments['--prefix'],
-        prefix_check=not arguments['--no-prefix-check']
-    )
+        prefix_check=not arguments['--no-prefix-check'])
 
-    jobs = ParseTime(';'.join(arguments['--keep']))
+    jobs = TimeParser(';'.join(arguments['--keep']))
     filesystems = zsm.filesystems(includes=arguments['--include'], excludes=arguments['--exclude'])
 
-    logging.debug("planing jobs for following times: %s", ", ".join(jobs.human))
-    plan = zsm.plan(
-        jobs.times,
-        filesystems,
-        maintain_symlinks=arguments['--symlinks'])
+    logging.debug("planning jobs for following times: %s", ", ".join(jobs.human_times))
+    plan = zsm.plan(jobs.times, filesystems, maintain_symlinks=arguments['--symlinks'])
 
     for index, action in enumerate(plan):
         if arguments['--run']:
+            assert isinstance(action, SnapshotManager.Action)
             action.do()
