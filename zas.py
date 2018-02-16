@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 # encoding: utf-8
-# vim: tabstop=4 shiftwidth=4 smarttab expandtab softtabstop=4 autoindent
 
 """
 Usage:
-  {cmd} --include=<filter>... [--keep=<time>...]
-    [--exclude=<filter>...] [--prefix=<string>] [--no-prefix-check] [--relative-name]
-    [--logfile=<path>] [--lock-file=<path>] [--zfs-binary=<path>] [--symlinks]
-    [--verbose] [--run]
+  {cmd} --include=<filter>... --keep=<time>... [--run] [options]
 
 Options:
-  --include=<filter>    Regular expression which filesystem to snapshot.
-  --keep=<time>         Definition how old a snapshot is required to be maximal..
-                        {time_help}
+  --include=<filter>, -i =<filter>  Regular expression which filesystem to snapshot.
+  --keep=<time>, -k <time>          Definition how old a snapshot is required to be maximal..
+                                    {time_help}
+  --run, -r                         Really change filesystem, without this doesnt change anything.
 
-  --exclude=<filter>    Regular expression to exclude filesystems by name.
-  --logfile=<path>      Write output to logfile (default is STDOUT).
-  --prefix=<string>     Snapshot name prefix. [default: snapshot-from-].
-  --no-prefix-check     Don't ignore snapshots without matching prefix.
-  --lock-file=<path>    Alternative location of lock file (default is the script file).
-  --zfs-binary=<path>   Alternative location of zfs binary [default: /sbin/zfs].
-  --symlinks            Create symlink required by samba vfs objects shadow_copy.
-  --verbose, -v         Activate more verbose logging.
-  --run, -r             Really change filesystem, without this doesnt change anything.
+  --exclude=<filter>                Regular expression to exclude filesystems by name.
+  --logfile=<path>                  Write output to logfile (default is STDOUT).
+  --prefix=<string>                 Snapshot name prefix. [default: snapshot-from-].
+  --no-prefix-check                 Don't ignore snapshots without matching prefix.
+  --lock-file=<path>                Alternative location of lock file (default is the script file).
+  --zfs-binary=<path>               Alternative location of zfs binary [default: /sbin/zfs].
+  --symlinks                        Create symlink required by samba vfs objects shadow_copy.
+  --verbose, -v                     Activate more verbose logging.
 
 Example:
 
@@ -321,8 +317,7 @@ class SnapshotManager(object):
                     creation_time = parse_time(set_creation)
                     result_index[set_name]['snapshots'][snapshot_name] = {
                         'creation': parse_time(set_creation),
-                        'age': now - int(creation_time.strftime("%s"))
-                    }
+                        'age': now - int(creation_time.strftime("%s"))}
 
         return result_index
 
@@ -411,7 +406,13 @@ class SnapshotManager(object):
                 return False
 
             if not os.path.islink(self.link_path) and os.path.isdir(self.snapshot_path):
-                self.call("ln", "--symbolic", self.snapshot_path, self.link_path)
+                try:
+                    os.symlink(self.snapshot_path, self.link_path)
+                except OSError as e:
+                    logging.error("%s: %s" % (self, e))
+                else:
+                    logging.info(self)
+
 
     class DeleteSymlink(Action):
 
@@ -424,7 +425,12 @@ class SnapshotManager(object):
 
         def do(self):
             if os.path.islink(self.link_path):
-                self.call("rm", self.link_path)
+                try:
+                    os.unlink(self.link_path)
+                except OSError as e:
+                    logging.error("%s: %s" % (self, e))
+                else:
+                    logging.info(self)
 
     class RenameSymlink(Action):
 
@@ -437,12 +443,19 @@ class SnapshotManager(object):
             return "rename symlink (%s > %s)" % (self.link_path, self.new_snapshot_path)
 
         def do(self):
+            try:
+                os.unlink(self.link_path)
+            except OSError as e:
+                logging.error("%s [remove old link]: %s" % (self, e))
+            else:
+                logging.info(self)
 
-            if os.path.islink(self.link_path):
-                self.call("rm", self.link_path)
-
-            if os.path.isdir(self.new_snapshot_path):
-                self.call("ln", "--symbolic", self.new_snapshot_path, self.link_path)
+                try:
+                    os.symlink(self.new_snapshot_path, self.link_path)
+                except OSError as e:
+                    logging.error("%s [create new link]: %s" % (self, e))
+                else:
+                    logging.info(self)
 
     def _snapshot_name(self, snapshot_creation: datetime.datetime):
         return "%s%s" % (self.snapshot_prefix, snapshot_creation.replace(second=0, microsecond=0).isoformat())
@@ -554,12 +567,19 @@ if __name__ == "__main__":
         prefix_check=not arguments['--no-prefix-check'])
 
     jobs = TimeParser(';'.join(arguments['--keep']))
-    filesystems = zsm.filesystems(includes=arguments['--include'], excludes=arguments['--exclude'])
 
-    logging.debug("planning jobs for following times: %s", ", ".join(jobs.human_times))
-    plan = zsm.plan(jobs.times, filesystems, maintain_symlinks=arguments['--symlinks'])
+    try:
+        filesystems = zsm.filesystems(includes=arguments['--include'], excludes=arguments['--exclude'])
 
-    for index, action in enumerate(plan):
-        if arguments['--run']:
-            assert isinstance(action, SnapshotManager.Action)
+    except OSError as e:
+        logging.critical('unable to list filesystems (%s)', e)
+
+    else:
+
+        logging.debug("planning jobs for following times: %s", ", ".join(jobs.human_times))
+        plan = zsm.plan(jobs.times, filesystems, maintain_symlinks=arguments['--symlinks'])
+
+        for index, action in enumerate(plan):
+            if arguments['--run']:
+                assert isinstance(action, SnapshotManager.Action)
             action.do()
