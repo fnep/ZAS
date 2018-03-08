@@ -3,30 +3,37 @@
 
 """
 Usage:
-  {cmd} --include=<filter>... --keep=<time>... [--run] [options]
+  {cmd} list <filesystem>... [--keep=<time>...] [options]
+  {cmd} manage <filesystem>... --keep=<time>... [--run] [options]
+
+Commands:
+  list                      List the filesystems. Preview what "manage" would do.
+  manage                    Create and delete snapshots to hold one for all required times.
 
 Options:
-  --include=<filter>, -i =<filter>  Regular expression which filesystem to snapshot.
-  --keep=<time>, -k <time>          Definition how old a snapshot is required to be maximal..
-                                    {time_help}
-  --run, -r                         Really change filesystem, without this doesnt change anything.
+  <filesystem>              Regular expression which filesystem to snapshot.
+  --keep=<time>, -k <time>  Definition how old a snapshot is required to be maximal..
+                            {time_help}
+  --run, -r                 Really change filesystem, without this do change anything.
 
-  --exclude=<filter>                Regular expression to exclude filesystems by name.
-  --logfile=<path>                  Write output to logfile (default is STDOUT).
-  --prefix=<string>                 Snapshot name prefix. [default: snapshot-from-].
-  --no-prefix-check                 Don't ignore snapshots without matching prefix.
-  --lock-file=<path>                Alternative location of lock file (default is the script file).
-  --zfs-binary=<path>               Alternative location of zfs binary [default: /sbin/zfs].
-  --symlinks                        Create symlink required by samba vfs objects shadow_copy.
-  --verbose, -v                     Activate more verbose logging.
+Manage options:
+  --exclude=<filter>        Regular expression to exclude filesystems by name.
+  --prefix=<string>         Snapshot name prefix. [default: snapshot-from-].
+  --no-prefix-check         Don't ignore snapshots without matching prefix.
+  --symlinks                Create symlink required by samba vfs objects shadow_copy.
+
+Other options:
+  --zfs-binary=<path>       Alternative location of zfs binary [default: /sbin/zfs].
+  --lock-file=<path>        Alternative location of lock file (default is the script file).
+  --logfile=<path>          Write output to logfile (default is STDOUT).
+  --verbose, -v             Activate more verbose logging.
 
 Example:
 
     - Create snapshots of filesystem tank/backup, that are not older then
-      1 to 6 hours, 1 to 7 days and each quarter of a year, take new snapshots
-      only when the hour begins:
+      1 to 6 hours, 1 to 7 days and each quarter of a year:
 
-        $ {cmd} --include=tank/backup --keep=1H*6,1d*7,1y/4 -r
+        $ {cmd} manage tank/backup --keep=1H*6,1d*7,1y/4 -r
  """
 
 __author__ = "Frank Epperlein"
@@ -49,7 +56,7 @@ class TimeParser(object):
     """
     Each definition can consist of combinations of:
         a number (1,2,3,...)
-        a letter (M,H,d,w,m or y)
+        a letter (M,H,d,W,m or y)
             M = Minutes
             H = Hours
             d = Days
@@ -288,24 +295,13 @@ class SnapshotManager(object):
             set_name, set_creation, set_type, set_mount_point = map(lambda s: s.strip(), set_record.split('\t'))
 
             if set_type == 'filesystem':
-                match = False
-                if not match:
-                    for include in includes:
-                        if re.match(include, set_name):
-                            match = True
-
-                if match:
-                    for exclude in excludes:
-                        if re.match(exclude, set_name):
-                            match = False
-                            break
-
-                if match:
-                    result_index[set_name] = {
-                        'creation': parse_time(set_creation),
-                        'mount_point': set_mount_point,
-                        'snapshots': dict()
-                    }
+                if any(re.match(inc, set_name) for inc in includes):
+                    if not any(re.match(exc, set_name) for exc in excludes):
+                        result_index[set_name] = {
+                            'creation': parse_time(set_creation),
+                            'mount_point': set_mount_point,
+                            'snapshots': dict()
+                        }
 
             elif set_type == 'snapshot':
                 set_name, snapshot_name = set_name.split('@')
@@ -413,7 +409,6 @@ class SnapshotManager(object):
                 else:
                     logging.info(self)
 
-
     class DeleteSymlink(Action):
 
         def __init__(self, mount_point, creation):
@@ -465,9 +460,10 @@ class SnapshotManager(object):
         if planed_filesystems is None:
             planed_filesystems = self.filesystems()
 
+        assert isinstance(planed_jobs, TimeParser)
         assert isinstance(planed_filesystems, self.Filesystems)
 
-        planed_jobs.sort()
+        planed_times = sorted(planed_jobs.times)
         for filesystem in planed_filesystems.keys():
 
             # initialize snapshots
@@ -476,10 +472,10 @@ class SnapshotManager(object):
 
             # mark snapshots, we want to keep
             satisfied_jobs = list()
-            for job_index, job in enumerate(planed_jobs):
+            for job_index, job in enumerate(planed_times):
 
                 if job_index > 0:
-                    last_job = planed_jobs[job_index - 1]
+                    last_job = planed_times[job_index - 1]
                 else:
                     last_job = 0  # 0 = now
 
@@ -517,7 +513,7 @@ class SnapshotManager(object):
                                 target_name)
 
             # see if we need to add a new snapshot
-            if len(planed_jobs) and planed_jobs[0] not in satisfied_jobs:
+            if len(planed_times) and planed_times[0] not in satisfied_jobs:
                 target_name = self._snapshot_name(datetime.datetime.now())
                 yield self.CreateSnapshot(self, filesystem, target_name)
                 if maintain_symlinks:
@@ -526,6 +522,45 @@ class SnapshotManager(object):
                         filesystem,
                         target_name,
                         planed_filesystems[filesystem]['mount_point'])
+
+
+def print_filesystem_listing(filesystems, plan):
+
+    for fs in filesystems.values():
+        fs['actions'] = fs.get('actions', [])
+
+    for action in plan:
+        if isinstance(action, SnapshotManager.CreateSnapshot) or \
+           isinstance(action, SnapshotManager.DeleteSnapshot) or \
+           isinstance(action, SnapshotManager.RenameSnapshot):
+            if action.filesystem in filesystems:
+                filesystems[action.filesystem]['actions'].append(action)
+
+    for fs_name, fs in sorted(filesystems.items(), key=lambda f: f[0]):
+
+        print()
+        print('- filesystem: %s\t creation: %s\t mountpoint: %s' % (fs_name, fs['creation'], fs['mount_point']))
+
+        for snapshot_name, snapshot in sorted(fs['snapshots'].items(), key=lambda s: s[1]['age']):
+
+            ss_action = ''
+            for action in fs['actions']:
+                if isinstance(action, SnapshotManager.DeleteSnapshot) and action.name == snapshot_name:
+                    ss_action = '[DELETE] '
+                elif isinstance(action, SnapshotManager.RenameSnapshot) and action.old_name == snapshot_name:
+                    ss_action = '[RENAME] '
+
+            print('  %ssnapshot: %s\t creation: %s (age: %s)'
+                  % (ss_action,
+                     snapshot_name,
+                     snapshot['creation'],
+                     TimeParser.humanize_time(snapshot['age'], join=' ')))
+
+        for action in fs['actions']:
+            if isinstance(action, SnapshotManager.CreateSnapshot):
+                print('  [CREATE] %s' % action)
+
+    print()
 
 
 def lock(path=__file__):
@@ -541,9 +576,9 @@ def lock(path=__file__):
         return True
 
 
-if __name__ == "__main__":
+def main():
     arguments = docopt.docopt(__doc__.format(cmd=os.path.basename(__file__),
-                                             time_help=indent(TimeParser.__doc__, ' ' * 20)))
+                                             time_help=indent(TimeParser.__doc__, ' ' * 24)))
 
     logging.basicConfig(
         filename=arguments['--logfile'],
@@ -569,17 +604,25 @@ if __name__ == "__main__":
     jobs = TimeParser(';'.join(arguments['--keep']))
 
     try:
-        filesystems = zsm.filesystems(includes=arguments['--include'], excludes=arguments['--exclude'])
+        filesystems = zsm.filesystems(includes=arguments['<filesystem>'], excludes=arguments['--exclude'])
 
-    except OSError as e:
-        logging.critical('unable to list filesystems (%s)', e)
+    except OSError as oe:
+        logging.critical('unable to list filesystems (%s)', oe)
 
     else:
 
         logging.debug("planning jobs for following times: %s", ", ".join(jobs.human_times))
-        plan = zsm.plan(jobs.times, filesystems, maintain_symlinks=arguments['--symlinks'])
+        plan = zsm.plan(jobs, filesystems, maintain_symlinks=arguments['--symlinks'])
 
-        for index, action in enumerate(plan):
-            if arguments['--run']:
-                assert isinstance(action, SnapshotManager.Action)
-            action.do()
+        if arguments['list']:
+            print_filesystem_listing(filesystems, plan if arguments['--keep'] else [])
+
+        elif arguments['manage']:
+            for index, action in enumerate(plan):
+                if arguments['--run']:
+                    assert isinstance(action, SnapshotManager.Action)
+                action.do()
+
+
+if __name__ == "__main__":
+    main()
