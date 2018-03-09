@@ -30,8 +30,8 @@ Other options:
 
 Example:
 
-    - Create snapshots of filesystem tank/backup, that are not older then
-      1 to 6 hours, 1 to 7 days and each quarter of a year:
+    - Keep snapshots of filesystem tank/backup, that are not older than
+      1 through 6 hours, 1 through 7 days and each quarter of a year:
 
         $ {cmd} manage tank/backup --keep=1H*6,1d*7,1y/4 -r
  """
