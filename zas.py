@@ -317,7 +317,7 @@ class SnapshotManager(object):
 
         return result_index
 
-    class Action(object):
+    class Action:
 
         def __repr__(self):
             raise NotImplementedError()
@@ -621,7 +621,7 @@ def main():
             for index, action in enumerate(plan):
                 if arguments['--run']:
                     assert isinstance(action, SnapshotManager.Action)
-                action.do()
+                    action.do()
 
 
 if __name__ == "__main__":
