@@ -4,7 +4,7 @@
 """
 Usage:
   {cmd} list <filesystem>... [--keep=<time>...] [options]
-  {cmd} manage <filesystem>... --keep=<time>... [--run] [options]
+  {cmd} manage <filesystem>... --keep=<time>... [--exclude=<filter>...] [--run] [options]
 
 Commands:
   list                      List the filesystems. Preview what "manage" would do.
